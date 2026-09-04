@@ -1,0 +1,53 @@
+# Local development harness: index a git repository with zoekt, serve it, and
+# expose it through zoekt-mcp. Driven by the Makefile; see README.
+name: zoekt-mcp-dev
+
+services:
+  # One-shot. zoekt-git-index reads committed objects, not the working tree, so
+  # uncommitted changes are not indexed.
+  indexer:
+    image: >-
+      ghcr.io/sourcegraph/zoekt@sha256:943b4bb5b17644e8a991dc41670a41f699355fd45cfa996b0746898dc9381530
+    entrypoint: ["zoekt-git-index"]
+    command:
+      - -index
+      - /data
+      - -branches
+      - ${REPO_BRANCH:?set REPO_BRANCH}
+      - -require_ctags
+      - /repo/${REPO_NAME:?set REPO_NAME}
+    user: "0:0"
+    volumes:
+      - index:/data
+      # Mounted under its own name so the shard is named after the repository
+      # rather than after the mount point.
+      - ${REPO_PATH:?set REPO_PATH}:/repo/${REPO_NAME}:ro
+    profiles: ["index"]
+
+  zoekt:
+    image: >-
+      ghcr.io/sourcegraph/zoekt@sha256:943b4bb5b17644e8a991dc41670a41f699355fd45cfa996b0746898dc9381530
+    entrypoint: ["zoekt-webserver"]
+    # -rpc is what serves the JSON API this project reads. Without it the
+    # /api/ routes are not registered at all.
+    command: ["-index", "/data", "-listen", ":6070", "-rpc"]
+    user: "0:0"
+    volumes:
+      - index:/data
+
+  mcp:
+    build: .
+    command:
+      - -transport
+      - http
+      - -http-address
+      - 0.0.0.0:8080
+      - -zoekt-url
+      - http://zoekt:6070
+    ports:
+      - "${MCP_PORT:-8080}:8080"
+    depends_on:
+      - zoekt
+
+volumes:
+  index:
