@@ -14,7 +14,7 @@ import (
 
 const (
 	Name    = "zoekt-mcp"
-	Version = "0.2.0"
+	Version = "0.2.1"
 )
 
 // Config bounds every response so one tool call cannot exhaust a model turn.
