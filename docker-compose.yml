@@ -44,6 +44,13 @@ services:
       - 0.0.0.0:8080
       - -zoekt-url
       - http://zoekt:6070
+      # zoekt records the directory it indexed, and the history tools open that
+      # path directly, so the repository has to be visible here under the same
+      # path the indexer saw it at.
+      - -repos-root
+      - /repo
+    volumes:
+      - ${REPO_PATH:?set REPO_PATH}:/repo/${REPO_NAME:?set REPO_NAME}:ro
     ports:
       - "${MCP_PORT:-8080}:8080"
     depends_on:

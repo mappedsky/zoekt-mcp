@@ -7,13 +7,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mappedsky/zoekt-mcp/internal/gitrepo"
 	"github.com/mappedsky/zoekt-mcp/internal/zoekt"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const (
 	Name    = "zoekt-mcp"
-	Version = "0.1.0"
+	Version = "0.2.0"
 )
 
 // Config bounds every response so one tool call cannot exhaust a model turn.
@@ -24,10 +25,19 @@ type Config struct {
 	MaxChunksPerFile int
 	// ContextLines pads each chunk when a call does not ask for its own.
 	ContextLines int
-	// MaxFileBytes caps the content returned by zoekt_get_file.
+	// MaxFileBytes caps the content returned by zoekt_get_file and git_file.
 	MaxFileBytes int
 	// SearchTimeout bounds the search server-side.
 	SearchTimeout time.Duration
+	// MaxCommits caps one history walk.
+	MaxCommits int
+	// MaxPatchBytes caps a returned unified diff.
+	MaxPatchBytes int
+	// MaxBlameLines caps one blame range.
+	MaxBlameLines int
+	// RepoPathTTL is how long a name-to-clone mapping is reused. Clone
+	// directories are stable across re-indexes, so this can be generous.
+	RepoPathTTL time.Duration
 }
 
 // DefaultConfig returns bounds sized for a chat turn rather than a bulk export.
@@ -38,6 +48,10 @@ func DefaultConfig() Config {
 		ContextLines:     2,
 		MaxFileBytes:     256 * 1024,
 		SearchTimeout:    20 * time.Second,
+		MaxCommits:       50,
+		MaxPatchBytes:    128 * 1024,
+		MaxBlameLines:    2000,
+		RepoPathTTL:      10 * time.Minute,
 	}
 }
 
@@ -174,11 +188,15 @@ type ReposOutput struct {
 }
 
 // New creates an MCP server exposing search over the zoekt index behind client.
-func New(client Searcher, config Config) *mcp.Server {
+//
+// When store is non-nil the history tools are registered as well, reading the
+// same clones the index was built from. Passing nil leaves the server
+// search-only, which is what a deployment without access to that volume wants.
+func New(client Searcher, store *gitrepo.Store, config Config) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:        Name,
 		Title:       "zoekt code search",
-		Description: "Search and read source code across the repositories indexed by zoekt.",
+		Description: "Search, read and trace the history of source code across the repositories indexed by zoekt.",
 		Version:     Version,
 		WebsiteURL:  "https://github.com/mappedsky/zoekt-mcp",
 	}, nil)
@@ -260,6 +278,8 @@ func New(client Searcher, config Config) *mcp.Server {
 		out, err := listRepos(ctx, client, in)
 		return nil, out, err
 	})
+
+	addGitTools(server, store, newRepoLocator(client, config.RepoPathTTL), config)
 
 	return server
 }

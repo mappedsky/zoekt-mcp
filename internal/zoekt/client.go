@@ -120,8 +120,13 @@ type RepositoryBranch struct {
 
 // Repository is the indexed metadata for one repository.
 type Repository struct {
-	Name       string             `json:"Name"`
-	URL        string             `json:"URL"`
+	Name string `json:"Name"`
+	URL  string `json:"URL"`
+	// Source is the directory the shard was built from. Sourcebot indexes bare
+	// clones under its own data directory and names them by an internal id, so
+	// this is the only mapping from the repository name a caller knows to the
+	// clone the git tools have to open.
+	Source     string             `json:"Source"`
 	Branches   []RepositoryBranch `json:"Branches"`
 	HasSymbols bool               `json:"HasSymbols"`
 }

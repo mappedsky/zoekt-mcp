@@ -1,18 +1,24 @@
 # zoekt-mcp
 
 A Model Context Protocol server over a [zoekt](https://github.com/sourcegraph/zoekt) code
-search index. It gives an agent general-purpose code search, symbol lookup, and file reads
-across every repository zoekt has indexed.
+search index. It gives an agent general-purpose code search, symbol lookup and file reads
+across every indexed repository, plus commit history, diffs and blame read straight from the
+clones the index was built from.
 
-It does not index anything itself. Indexing and repository sync belong to zoekt
+It does not index or clone anything itself. Indexing and repository sync belong to zoekt
 (`zoekt-indexserver`, `zoekt-mirror-github`) or to whatever maintains the shards — this
-server only reads the result through `zoekt-webserver`'s JSON API.
+server reads the result through `zoekt-webserver`'s JSON API and, for history, opens the
+same repositories read-only with [go-git](https://github.com/go-git/go-git). No git binary,
+no subprocess, and no ownership check, so it runs from a scratch image against a read-only
+mount owned by another user.
 
 ## Tools
 
-Six tools, deliberately. Every tool a proxy advertises enters the model's per-turn
-capability listing, so the surface is kept to what an investigation actually calls, and
-capability is added as arguments to an existing tool wherever that works.
+Every tool a proxy advertises enters the model's per-turn capability listing, so the surface
+is kept to what an investigation actually calls, and capability is added as arguments to an
+existing tool wherever that works.
+
+Search, always registered:
 
 | Tool | Answers |
 | --- | --- |
@@ -22,6 +28,33 @@ capability is added as arguments to an existing tool wherever that works.
 | `zoekt_get_file` | Read one indexed file in full. |
 | `zoekt_list_files` | Which paths exist matching this pattern? No content read. |
 | `zoekt_list_repos` | What is indexed, on which branches, how stale — and, with `containing`, which repositories could match a query. |
+
+History, registered only when `-repos-root` is set:
+
+| Tool | Answers |
+| --- | --- |
+| `git_log` | Which commits touched this, and when? Path-scoped. |
+| `git_show` | What did this commit change? Per-file counts, diff on request. |
+| `git_diff` | What moved between these two revisions? |
+| `git_blame` | Who last touched these lines, and in which commit? |
+| `git_file` | What did this file look like at *any* revision, including tags the index never covered? |
+| `git_refs` | Which branches and tags does the clone hold? |
+
+Without a repository root the server is search-only, which is the right shape for a
+deployment that reaches zoekt over the network but cannot see the volume the clones sit on.
+
+### How a repository name reaches a clone
+
+The two halves address repositories by the same name, and that is not free. A clone made by
+an indexing product is typically bare, has its origin URL removed so no credential is
+persisted, and lives in a directory named by an internal database id — nothing on the
+filesystem says which repository it is.
+
+zoekt records both the configured name and the directory it indexed, so `/api/list` is the
+mapping: `Name` is what the caller passes, `Source` is what the history tools open. The
+result is cached (`-repo-path-ttl`, default 10 minutes) because clone directories are stable
+across re-indexes, and a name the cache has not seen forces an immediate refresh. Every
+resolved path must sit under `-repos-root`; a path outside it is refused rather than opened.
 
 ### Sweep before you read
 
@@ -47,16 +80,28 @@ conclusion from it.
 
 ## What this cannot answer
 
-zoekt indexes content at a revision. It holds no commit graph, so there is no history,
-blame, diff, or "when did this change" here, and there never can be — those need the git
-host. It has no embeddings, so there is no semantic or natural-language search. Symbol data
-is universal-ctags, so definitions are a ctags index and references are a regex, not a
-resolved call graph.
+Everything here comes from an index and a git clone, so anything that lives only in the
+forge is out of reach: pull requests, issues, reviews, CI results and release notes are not
+in a clone and never will be. There are no embeddings, so no semantic or natural-language
+search. Symbol data is universal-ctags, so definitions are a ctags index and references are
+a regex, not a resolved call graph.
+
+Two different staleness models apply, and confusing them produces confident wrong answers:
+
+- **Search** sees the last *indexed* revision of the branches the indexer was told to cover.
+- **History** sees the last *fetched* state of every branch in the clone, which is usually
+  more branches and is at least as fresh.
+
+Neither is live. A commit pushed minutes ago is invisible to both until the next sync, so a
+verdict from these tools is a verdict about a specific indexed revision — `zoekt_list_repos`
+reports `indexed_at` so a caller can say which.
 
 ## Security contract
 
 - Every tool is a read-only query against one configured `zoekt-webserver`. No tool accepts
   a destination URL, and nothing writes.
+- History is read through go-git with no write paths at all; the repositories can and should
+  be mounted read-only.
 - The server has **no authentication of its own**. Whoever can reach the port can read
   everything in the index. When the index holds private source, the network boundary is the
   only control — bind it to loopback or a cluster-internal address and put nothing in front
@@ -72,8 +117,15 @@ Results are bounded so one call cannot exhaust a model turn. Every bound is a fl
 | `-max-files` | 30 | Files returned by one search. |
 | `-max-chunks-per-file` | 10 | Match chunks reported per file; the remainder is counted in `elided_chunks`. |
 | `-context-lines` | 2 | Lines of context around each match. |
-| `-max-file-bytes` | 262144 | Ceiling on `zoekt_get_file`, which sets `truncated`. |
+| `-max-file-bytes` | 262144 | Ceiling on `zoekt_get_file` and `git_file`, which sets `truncated`. |
 | `-search-timeout` | 20s | Server-side search deadline. |
+| `-max-commits` | 50 | Commits returned by one `git_log`. |
+| `-max-patch-bytes` | 131072 | Ceiling on a returned unified diff. |
+| `-max-blame-lines` | 2000 | Lines returned by one `git_blame`. |
+| `-repo-path-ttl` | 10m | How long a name-to-clone mapping is reused. |
+
+`git_show` and `git_diff` omit the patch text unless `include_patch` is set: the per-file
+line counts answer most questions and a diff is the largest thing either can return.
 
 A caller may ask for less than a ceiling but never more.
 
@@ -156,10 +208,19 @@ go run ./cmd/zoekt-mcp -zoekt-url http://localhost:6070
 go run ./cmd/zoekt-mcp -transport http -http-address 127.0.0.1:8080 -zoekt-url http://localhost:6070
 ```
 
+Add `-repos-root` to enable the history tools. It must be a directory containing the clones
+zoekt indexed, mounted at the same path the indexer saw them at, since the paths come from
+the index rather than from configuration:
+
+```sh
+go run ./cmd/zoekt-mcp -zoekt-url http://localhost:6070 -repos-root /data/.sourcebot/repos
+```
+
 Every flag has an environment variable: `ZOEKT_MCP_URL`, `ZOEKT_MCP_TRANSPORT`,
 `ZOEKT_MCP_HTTP_ADDRESS`, `ZOEKT_MCP_HTTP_PATH`, `ZOEKT_MCP_MAX_FILES`,
 `ZOEKT_MCP_MAX_CHUNKS_PER_FILE`, `ZOEKT_MCP_CONTEXT_LINES`, `ZOEKT_MCP_MAX_FILE_BYTES`,
-`ZOEKT_MCP_SEARCH_TIMEOUT`.
+`ZOEKT_MCP_SEARCH_TIMEOUT`, `ZOEKT_MCP_REPOS_ROOT`, `ZOEKT_MCP_MAX_COMMITS`,
+`ZOEKT_MCP_MAX_PATCH_BYTES`, `ZOEKT_MCP_MAX_BLAME_LINES`, `ZOEKT_MCP_REPO_PATH_TTL`.
 
 ### Stdio client configuration
 

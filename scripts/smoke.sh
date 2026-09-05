@@ -68,6 +68,8 @@ done
 [ -n "$ready" ] || { echo "server did not become ready" >&2; exit 1; }
 
 echo "==> tools/list"
+tool_names="$(rpc tools/list "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{${META}}}" \
+  | python3 -c 'import json,sys; print("\n".join(t["name"] for t in json.load(sys.stdin)["result"]["tools"]))')"
 rpc tools/list "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{${META}}}" | python3 -c '
 import json, sys
 tools = json.load(sys.stdin)["result"]["tools"]
@@ -111,5 +113,32 @@ call_tool zoekt_find_references "{\"symbol\":\"${SYMBOL}\",\"max_files\":5}" \
 echo "==> zoekt_list_repos containing=${TERM_QUERY} (candidate sweep, no content read)"
 call_tool zoekt_list_repos "{\"containing\":\"${TERM_QUERY}\"}" \
   | field '"    %d candidate repo(s): %s" % (d["count"], [r["name"] for r in d["repos"]])'
+
+# The history tools are only registered when a repository root is configured,
+# so skip them rather than fail when the stack is running search-only.
+if printf '%s' "$tool_names" | grep -q '^git_log$'; then
+  echo "==> git_refs"
+  call_tool git_refs "{\"repo\":\"${repo}\"}" \
+    | field '"    %d ref(s): %s" % (d["count"], [r["name"] for r in d["refs"]][:5])'
+
+  echo "==> git_log (${sample})"
+  call_tool git_log "{\"repo\":\"${repo}\",\"path\":\"${sample}\",\"limit\":3}" \
+    | field '"    %d commit(s): %s" % (d["count"], [(c["short"], c["subject"][:40]) for c in d["commits"]])'
+
+  echo "==> git_show (newest commit touching ${sample})"
+  rev="$(call_tool git_log "{\"repo\":\"${repo}\",\"path\":\"${sample}\",\"limit\":1}" | field 'd["commits"][0]["hash"]')"
+  call_tool git_show "{\"repo\":\"${repo}\",\"rev\":\"${rev}\"}" \
+    | field '"    %s by %s; %d file(s) changed" % (d["commit"]["short"], d["commit"]["author"], len(d["files"]))'
+
+  echo "==> git_blame (${sample} lines 1-3)"
+  call_tool git_blame "{\"repo\":\"${repo}\",\"path\":\"${sample}\",\"start_line\":1,\"end_line\":3}" \
+    | field '"    %d of %d line(s); line1 by %s" % (len(d["lines"]), d["total_lines"], d["lines"][0]["author"])'
+
+  echo "==> git_file (${sample} at HEAD)"
+  call_tool git_file "{\"repo\":\"${repo}\",\"path\":\"${sample}\"}" \
+    | field '"    %d bytes, truncated=%s" % (d["bytes"], d.get("truncated", False))'
+else
+  echo "==> history tools not registered (no -repos-root); skipping"
+fi
 
 echo "==> OK"

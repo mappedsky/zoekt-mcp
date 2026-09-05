@@ -15,6 +15,7 @@ type fakeSearcher struct {
 	result    *zoekt.SearchResult
 	list      *zoekt.RepoList
 	searches  int
+	lists     int
 }
 
 func (f *fakeSearcher) Search(_ context.Context, query string, opts *zoekt.SearchOptions) (*zoekt.SearchResult, error) {
@@ -28,6 +29,7 @@ func (f *fakeSearcher) Search(_ context.Context, query string, opts *zoekt.Searc
 }
 
 func (f *fakeSearcher) List(_ context.Context, query string, _ *zoekt.ListOptions) (*zoekt.RepoList, error) {
+	f.lists++
 	f.lastQuery = query
 	if f.list == nil {
 		return &zoekt.RepoList{}, nil
