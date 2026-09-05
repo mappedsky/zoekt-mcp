@@ -18,8 +18,14 @@ import (
 	"time"
 )
 
-// maxErrorBody bounds how much of a failed response is quoted back in an error.
-const maxErrorBody = 4096
+const (
+	// maxErrorBody bounds how much of a failed response is quoted back in an error.
+	maxErrorBody = 4096
+	// maxResponseBody bounds a successful response. The upstream is trusted and
+	// in-cluster, but a bounded decode is what stops a wrong or wedged one from
+	// becoming this process's memory problem.
+	maxResponseBody = 256 << 20
+)
 
 // SearchOptions is the subset of zoekt.SearchOptions this client sets.
 // Fields are omitted when zero so the server applies its own heuristics.
@@ -255,7 +261,7 @@ func (c *Client) post(ctx context.Context, path string, payload, out any) error 
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("zoekt %s: %s", path, describeFailure(response))
 	}
-	if err := json.NewDecoder(response.Body).Decode(out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBody)).Decode(out); err != nil {
 		return fmt.Errorf("decode %s response: %w", path, err)
 	}
 	return nil

@@ -1,8 +1,10 @@
 package gitrepo
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,14 +13,14 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
-func plumbingHash(t *testing.T, hash string) plumbing.Hash {
+func plumbingHash(t testing.TB, hash string) plumbing.Hash {
 	t.Helper()
 	return plumbing.NewHash(hash)
 }
 
 // fixture builds a repository under root with two commits and one tag, and
 // returns its path.
-func fixture(t *testing.T, root string) string {
+func fixture(t testing.TB, root string) string {
 	t.Helper()
 	path := filepath.Join(root, "repo")
 	repository, err := git.PlainInit(path, false)
@@ -49,7 +51,7 @@ func fixture(t *testing.T, root string) string {
 
 	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	commit("requirements.txt", "pyyaml==6.0\n", "Add requirements", base)
-	commit("README.md", "# fixture\n", "Add README", base.Add(time.Hour))
+	commit("README.md", "# fixture\n\nthree\nlines here\n", "Add README", base.Add(time.Hour))
 	head := commit("requirements.txt", "pyyaml==6.0.2\n", "Bump pyyaml", base.Add(2*time.Hour))
 
 	if _, err := repository.CreateTag("v1.0.0", plumbingHash(t, head), nil); err != nil {
@@ -82,7 +84,7 @@ func TestNewStoreRejectsUnusableRoots(t *testing.T) {
 func TestStoreRefusesPathsOutsideItsRoot(t *testing.T) {
 	store, _ := newFixtureStore(t)
 	for _, path := range []string{"/etc", filepath.Join(store.Root(), "..", "elsewhere"), "relative"} {
-		if _, err := store.Log(path, LogOptions{Limit: 1}); err == nil {
+		if _, err := store.Log(context.Background(), path, LogOptions{Limit: 1}); err == nil {
 			t.Fatalf("Log(%q) = nil error; want it refused", path)
 		}
 	}
@@ -90,7 +92,7 @@ func TestStoreRefusesPathsOutsideItsRoot(t *testing.T) {
 
 func TestLogReturnsNewestFirst(t *testing.T) {
 	store, path := newFixtureStore(t)
-	commits, err := store.Log(path, LogOptions{Limit: 10})
+	commits, err := store.Log(context.Background(), path, LogOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("Log: %v", err)
 	}
@@ -109,7 +111,7 @@ func TestLogReturnsNewestFirst(t *testing.T) {
 // question a dependency finding actually raises.
 func TestLogFiltersByPath(t *testing.T) {
 	store, path := newFixtureStore(t)
-	commits, err := store.Log(path, LogOptions{Path: "requirements.txt", Limit: 10})
+	commits, err := store.Log(context.Background(), path, LogOptions{Path: "requirements.txt", Limit: 10})
 	if err != nil {
 		t.Fatalf("Log: %v", err)
 	}
@@ -125,7 +127,7 @@ func TestLogFiltersByPath(t *testing.T) {
 
 func TestLogHonoursTheLimit(t *testing.T) {
 	store, path := newFixtureStore(t)
-	commits, err := store.Log(path, LogOptions{Limit: 1})
+	commits, err := store.Log(context.Background(), path, LogOptions{Limit: 1})
 	if err != nil {
 		t.Fatalf("Log: %v", err)
 	}
@@ -136,7 +138,7 @@ func TestLogHonoursTheLimit(t *testing.T) {
 
 func TestShowReportsChurnAndOmitsThePatchByDefault(t *testing.T) {
 	store, path := newFixtureStore(t)
-	commit, files, patch, truncated, err := store.Show(path, "HEAD", false, 1024)
+	commit, files, patch, truncated, err := store.Show(context.Background(), path, "HEAD", false, 1024)
 	if err != nil {
 		t.Fatalf("Show: %v", err)
 	}
@@ -153,7 +155,7 @@ func TestShowReportsChurnAndOmitsThePatchByDefault(t *testing.T) {
 
 func TestShowTruncatesALargePatch(t *testing.T) {
 	store, path := newFixtureStore(t)
-	_, _, patch, truncated, err := store.Show(path, "HEAD", true, 10)
+	_, _, patch, truncated, err := store.Show(context.Background(), path, "HEAD", true, 10)
 	if err != nil {
 		t.Fatalf("Show: %v", err)
 	}
@@ -166,12 +168,12 @@ func TestShowTruncatesALargePatch(t *testing.T) {
 // state a history walk reaches.
 func TestShowHandlesTheRootCommit(t *testing.T) {
 	store, path := newFixtureStore(t)
-	commits, err := store.Log(path, LogOptions{Limit: 10})
+	commits, err := store.Log(context.Background(), path, LogOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("Log: %v", err)
 	}
 	root := commits[len(commits)-1]
-	_, files, _, _, err := store.Show(path, root.Hash, false, 1024)
+	_, files, _, _, err := store.Show(context.Background(), path, root.Hash, false, 1024)
 	if err != nil {
 		t.Fatalf("Show(root): %v", err)
 	}
@@ -182,11 +184,11 @@ func TestShowHandlesTheRootCommit(t *testing.T) {
 
 func TestDiffBetweenTagAndHead(t *testing.T) {
 	store, path := newFixtureStore(t)
-	commits, err := store.Log(path, LogOptions{Limit: 10})
+	commits, err := store.Log(context.Background(), path, LogOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("Log: %v", err)
 	}
-	files, _, _, err := store.Diff(path, commits[len(commits)-1].Hash, "v1.0.0", false, 1024)
+	files, _, _, err := store.Diff(context.Background(), path, commits[len(commits)-1].Hash, "v1.0.0", false, 1024)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -197,7 +199,7 @@ func TestDiffBetweenTagAndHead(t *testing.T) {
 
 func TestBlameAttributesLinesAndBoundsTheRange(t *testing.T) {
 	store, path := newFixtureStore(t)
-	lines, total, err := store.Blame(path, "", "requirements.txt", 1, 1)
+	lines, total, err := store.Blame(context.Background(), path, "", "requirements.txt", 1, 1, 0)
 	if err != nil {
 		t.Fatalf("Blame: %v", err)
 	}
@@ -216,7 +218,7 @@ func TestBlameAttributesLinesAndBoundsTheRange(t *testing.T) {
 // covers indexed branches.
 func TestFileReadsAtATag(t *testing.T) {
 	store, path := newFixtureStore(t)
-	content, truncated, err := store.File(path, "v1.0.0", "requirements.txt", 1024)
+	content, truncated, err := store.File(context.Background(), path, "v1.0.0", "requirements.txt", 1024)
 	if err != nil {
 		t.Fatalf("File: %v", err)
 	}
@@ -230,7 +232,7 @@ func TestFileReadsAtATag(t *testing.T) {
 
 func TestFileTruncatesAtTheByteLimit(t *testing.T) {
 	store, path := newFixtureStore(t)
-	content, truncated, err := store.File(path, "", "requirements.txt", 4)
+	content, truncated, err := store.File(context.Background(), path, "", "requirements.txt", 4)
 	if err != nil {
 		t.Fatalf("File: %v", err)
 	}
@@ -241,14 +243,14 @@ func TestFileTruncatesAtTheByteLimit(t *testing.T) {
 
 func TestFileReportsAMissingPathClearly(t *testing.T) {
 	store, path := newFixtureStore(t)
-	if _, _, err := store.File(path, "", "nope.txt", 1024); err == nil {
+	if _, _, err := store.File(context.Background(), path, "", "nope.txt", 1024); err == nil {
 		t.Fatal("missing file accepted; want an error")
 	}
 }
 
 func TestRefsListsBranchesAndTags(t *testing.T) {
 	store, path := newFixtureStore(t)
-	refs, err := store.Refs(path)
+	refs, err := store.Refs(context.Background(), path)
 	if err != nil {
 		t.Fatalf("Refs: %v", err)
 	}
@@ -269,7 +271,71 @@ func TestRefsListsBranchesAndTags(t *testing.T) {
 
 func TestResolveRejectsAnUnknownRevision(t *testing.T) {
 	store, path := newFixtureStore(t)
-	if _, err := store.Log(path, LogOptions{Rev: "no-such-ref", Limit: 1}); err == nil {
+	if _, err := store.Log(context.Background(), path, LogOptions{Rev: "no-such-ref", Limit: 1}); err == nil {
 		t.Fatal("unknown revision accepted; want an error")
+	}
+}
+
+// The lexical check alone passes a symlink that resolves outside the root.
+// go-git refuses to cross its own chroot boundary too, but this asserts our
+// check fires first, so the boundary is one we own rather than one we inherit.
+func TestStoreRefusesASymlinkOutOfTheRoot(t *testing.T) {
+	outside := t.TempDir()
+	fixture(t, outside)
+
+	root := t.TempDir()
+	link := filepath.Join(root, "escape")
+	if err := os.Symlink(filepath.Join(outside, "repo"), link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	store, err := NewStore(root)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	_, err = store.Log(context.Background(), link, LogOptions{Limit: 1})
+	if err == nil {
+		t.Fatal("symlink out of the root was opened")
+	}
+	if !strings.Contains(err.Error(), "outside the configured root") {
+		t.Fatalf("error = %v; want it refused by the root check", err)
+	}
+}
+
+// Blame costs the whole file however few lines are asked for, so the file
+// limit is the only bound that actually holds.
+func TestBlameRefusesAFileOverTheLineLimit(t *testing.T) {
+	store, path := newFixtureStore(t)
+	_, total, err := store.Blame(context.Background(), path, "", "README.md", 1, 1, 0)
+	if err != nil {
+		t.Fatalf("Blame: %v", err)
+	}
+	if total < 2 {
+		t.Fatalf("fixture file has %d lines; the limit cannot be exercised", total)
+	}
+
+	// Asking for a single line does not reduce the work, so the limit has to
+	// refuse on the file's size rather than on the range.
+	_, reported, err := store.Blame(context.Background(), path, "", "README.md", 1, 1, total-1)
+	if err == nil {
+		t.Fatal("a file over the line limit was blamed")
+	}
+	if !strings.Contains(err.Error(), "blame limit") {
+		t.Fatalf("error = %v; want it to name the blame limit", err)
+	}
+	if reported != total {
+		t.Fatalf("reported %d lines; want the real count %d so a caller can retune", reported, total)
+	}
+}
+
+// A path-scoped walk visits every commit when nothing matches, so a caller's
+// deadline has to be able to stop it.
+func TestLogStopsOnACancelledContext(t *testing.T) {
+	store, path := newFixtureStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := store.Log(ctx, path, LogOptions{Limit: 10}); err == nil {
+		t.Fatal("cancelled context did not stop the walk")
 	}
 }

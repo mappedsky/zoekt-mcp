@@ -7,6 +7,7 @@
 package gitrepo
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,9 @@ type Store struct {
 // NewStore returns a store that will only open paths under root. The index
 // supplies those paths, so confining them is what keeps a surprising value
 // from turning into an arbitrary filesystem read.
+//
+// The root is resolved through any symlinks up front, so that comparing a
+// resolved candidate against it is a comparison of real paths.
 func NewStore(root string) (*Store, error) {
 	cleaned := filepath.Clean(strings.TrimSpace(root))
 	if cleaned == "" || cleaned == "." {
@@ -32,6 +36,11 @@ func NewStore(root string) (*Store, error) {
 	}
 	if !filepath.IsAbs(cleaned) {
 		return nil, fmt.Errorf("repository root must be an absolute path, got %q", root)
+	}
+	// A root that does not exist yet, or that cannot be resolved, is kept as
+	// written: the lexical check still applies and opening simply fails.
+	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
+		cleaned = resolved
 	}
 	return &Store{root: cleaned}, nil
 }
@@ -43,6 +52,13 @@ func (s *Store) open(path string) (*git.Repository, error) {
 	cleaned := filepath.Clean(path)
 	if !filepath.IsAbs(cleaned) {
 		return nil, fmt.Errorf("repository path must be absolute, got %q", path)
+	}
+	// Compare real paths, not lexical ones: a symlink inside the root that
+	// resolves outside it passes a purely lexical check. go-git refuses to
+	// cross its own chroot boundary as well, but relying on a dependency's
+	// internals for a security property is not a boundary we own.
+	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
+		cleaned = resolved
 	}
 	relative, err := filepath.Rel(s.root, cleaned)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
@@ -100,7 +116,7 @@ type LogOptions struct {
 
 // Log returns commits reachable from a revision, newest first, optionally
 // restricted to those touching one path.
-func (s *Store) Log(path string, opts LogOptions) ([]Commit, error) {
+func (s *Store) Log(ctx context.Context, path string, opts LogOptions) ([]Commit, error) {
 	repository, err := s.open(path)
 	if err != nil {
 		return nil, err
@@ -122,6 +138,11 @@ func (s *Store) Log(path string, opts LogOptions) ([]Commit, error) {
 
 	commits := make([]Commit, 0, opts.Limit)
 	err = iter.ForEach(func(commit *object.Commit) error {
+		// A path-scoped walk visits every commit in history when nothing
+		// matches, so the caller's deadline has to be able to stop it.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if len(commits) >= opts.Limit {
 			return storeStopIteration
 		}
@@ -135,7 +156,7 @@ func (s *Store) Log(path string, opts LogOptions) ([]Commit, error) {
 }
 
 // Show returns one commit with its per-file churn, and its patch when asked.
-func (s *Store) Show(path, rev string, includePatch bool, maxPatchBytes int) (Commit, []FileStat, string, bool, error) {
+func (s *Store) Show(ctx context.Context, path, rev string, includePatch bool, maxPatchBytes int) (Commit, []FileStat, string, bool, error) {
 	repository, err := s.open(path)
 	if err != nil {
 		return Commit{}, nil, "", false, err
@@ -157,7 +178,7 @@ func (s *Store) Show(path, rev string, includePatch bool, maxPatchBytes int) (Co
 			return Commit{}, nil, "", false, fmt.Errorf("read parent of %s: %w", hash, err)
 		}
 	}
-	stats, patch, truncated, err := diffCommits(parent, commit, includePatch, maxPatchBytes)
+	stats, patch, truncated, err := diffCommits(ctx, parent, commit, includePatch, maxPatchBytes)
 	if err != nil {
 		return Commit{}, nil, "", false, err
 	}
@@ -165,7 +186,7 @@ func (s *Store) Show(path, rev string, includePatch bool, maxPatchBytes int) (Co
 }
 
 // Diff compares two revisions.
-func (s *Store) Diff(path, from, to string, includePatch bool, maxPatchBytes int) ([]FileStat, string, bool, error) {
+func (s *Store) Diff(ctx context.Context, path, from, to string, includePatch bool, maxPatchBytes int) ([]FileStat, string, bool, error) {
 	repository, err := s.open(path)
 	if err != nil {
 		return nil, "", false, err
@@ -186,11 +207,11 @@ func (s *Store) Diff(path, from, to string, includePatch bool, maxPatchBytes int
 	if err != nil {
 		return nil, "", false, fmt.Errorf("read commit %s: %w", toHash, err)
 	}
-	return diffCommits(fromCommit, toCommit, includePatch, maxPatchBytes)
+	return diffCommits(ctx, fromCommit, toCommit, includePatch, maxPatchBytes)
 }
 
 // Blame attributes each line of a file at a revision.
-func (s *Store) Blame(path, rev, file string, start, end int) ([]BlameLine, int, error) {
+func (s *Store) Blame(_ context.Context, path, rev, file string, start, end, maxFileLines int) ([]BlameLine, int, error) {
 	repository, err := s.open(path)
 	if err != nil {
 		return nil, 0, err
@@ -203,6 +224,26 @@ func (s *Store) Blame(path, rev, file string, start, end int) ([]BlameLine, int,
 	if err != nil {
 		return nil, 0, fmt.Errorf("read commit %s: %w", hash, err)
 	}
+
+	// Blame is computed for the whole file no matter which lines are asked
+	// for, so a line range bounds the response and not the work. Refuse a file
+	// that is too large instead, which is the only bound that actually holds.
+	if maxFileLines > 0 {
+		entry, err := commit.File(file)
+		if err != nil {
+			return nil, 0, fmt.Errorf("read %s at %s: %w", file, describeRev(rev), err)
+		}
+		lineCount, err := entry.Lines()
+		if err != nil {
+			return nil, 0, fmt.Errorf("count lines of %s: %w", file, err)
+		}
+		if len(lineCount) > maxFileLines {
+			return nil, len(lineCount), fmt.Errorf(
+				"%s has %d lines at %s, over the %d-line blame limit; blame is computed for the whole file regardless of the range asked for, so narrow to a smaller file or raise -max-blame-file-lines",
+				file, len(lineCount), describeRev(rev), maxFileLines)
+		}
+	}
+
 	result, err := git.Blame(commit, file)
 	if err != nil {
 		return nil, 0, fmt.Errorf("blame %s at %s: %w", file, rev, err)
@@ -238,7 +279,7 @@ func (s *Store) Blame(path, rev, file string, start, end int) ([]BlameLine, int,
 
 // File returns a file's content at a revision. Unlike an index lookup this
 // reaches any revision the clone holds, including tags the index never covered.
-func (s *Store) File(path, rev, file string, maxBytes int) (string, bool, error) {
+func (s *Store) File(_ context.Context, path, rev, file string, maxBytes int) (string, bool, error) {
 	repository, err := s.open(path)
 	if err != nil {
 		return "", false, err
@@ -273,7 +314,7 @@ func describeRev(rev string) string {
 }
 
 // Refs lists the branches and tags the clone holds.
-func (s *Store) Refs(path string) ([]Ref, error) {
+func (s *Store) Refs(_ context.Context, path string) ([]Ref, error) {
 	repository, err := s.open(path)
 	if err != nil {
 		return nil, err
@@ -336,7 +377,7 @@ func resolve(repository *git.Repository, rev string) (plumbing.Hash, error) {
 	return *hash, nil
 }
 
-func diffCommits(from, to *object.Commit, includePatch bool, maxPatchBytes int) ([]FileStat, string, bool, error) {
+func diffCommits(ctx context.Context, from, to *object.Commit, includePatch bool, maxPatchBytes int) ([]FileStat, string, bool, error) {
 	var patch *object.Patch
 	var err error
 	if from == nil {
@@ -347,7 +388,7 @@ func diffCommits(from, to *object.Commit, includePatch bool, maxPatchBytes int) 
 		if patch, err = (&object.Tree{}).Patch(tree); err != nil {
 			return nil, "", false, fmt.Errorf("diff root commit: %w", err)
 		}
-	} else if patch, err = from.Patch(to); err != nil {
+	} else if patch, err = from.PatchContext(ctx, to); err != nil {
 		return nil, "", false, fmt.Errorf("diff %s..%s: %w", short(from.Hash.String()), short(to.Hash.String()), err)
 	}
 

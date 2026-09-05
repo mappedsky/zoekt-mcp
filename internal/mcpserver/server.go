@@ -35,6 +35,12 @@ type Config struct {
 	MaxPatchBytes int
 	// MaxBlameLines caps one blame range.
 	MaxBlameLines int
+	// MaxBlameFileLines refuses to blame a file longer than this. Blame is
+	// computed for the whole file however few lines are requested, so this is
+	// the only bound on the work rather than on the response.
+	MaxBlameFileLines int
+	// GitTimeout bounds one git operation.
+	GitTimeout time.Duration
 	// RepoPathTTL is how long a name-to-clone mapping is reused. Clone
 	// directories are stable across re-indexes, so this can be generous.
 	RepoPathTTL time.Duration
@@ -43,15 +49,17 @@ type Config struct {
 // DefaultConfig returns bounds sized for a chat turn rather than a bulk export.
 func DefaultConfig() Config {
 	return Config{
-		MaxFiles:         30,
-		MaxChunksPerFile: 10,
-		ContextLines:     2,
-		MaxFileBytes:     256 * 1024,
-		SearchTimeout:    20 * time.Second,
-		MaxCommits:       50,
-		MaxPatchBytes:    128 * 1024,
-		MaxBlameLines:    2000,
-		RepoPathTTL:      10 * time.Minute,
+		MaxFiles:          30,
+		MaxChunksPerFile:  10,
+		ContextLines:      2,
+		MaxFileBytes:      256 * 1024,
+		SearchTimeout:     20 * time.Second,
+		MaxCommits:        50,
+		MaxPatchBytes:     128 * 1024,
+		MaxBlameLines:     2000,
+		MaxBlameFileLines: 50000,
+		GitTimeout:        30 * time.Second,
+		RepoPathTTL:       10 * time.Minute,
 	}
 }
 

@@ -102,6 +102,13 @@ reports `indexed_at` so a caller can say which.
   a destination URL, and nothing writes.
 - History is read through go-git with no write paths at all; the repositories can and should
   be mounted read-only.
+- **A caller never supplies a filesystem path.** Every history tool takes a repository *name*
+  and resolves it through the index, so a tool argument cannot name a file to open. Resolved
+  paths are then confined to `-repos-root`, compared after resolving symlinks, so a link
+  inside the root that points outside it is refused.
+- Tool arguments should be treated as attacker-influenceable. Indexed source is untrusted
+  content, a model reads it, and the same model chooses these arguments — so every bound
+  below is a real limit rather than a nicety.
 - The server has **no authentication of its own**. Whoever can reach the port can read
   everything in the index. When the index holds private source, the network boundary is the
   only control — bind it to loopback or a cluster-internal address and put nothing in front
@@ -123,6 +130,18 @@ Results are bounded so one call cannot exhaust a model turn. Every bound is a fl
 | `-max-patch-bytes` | 131072 | Ceiling on a returned unified diff. |
 | `-max-blame-lines` | 2000 | Lines returned by one `git_blame`. |
 | `-repo-path-ttl` | 10m | How long a name-to-clone mapping is reused. |
+| `-max-blame-file-lines` | 50000 | Refuse to blame a file longer than this. |
+| `-git-timeout` | 30s | Deadline for one git operation. |
+
+Most limits bound the response. Two bound the *work*, which is a different thing and the
+reason they exist separately:
+
+- `git_blame` computes attribution for the whole file however few lines are requested, so a
+  line range cannot bound it. `-max-blame-file-lines` refuses an over-large file instead, and
+  reports the real line count so a caller can narrow or the limit can be retuned.
+- A path-scoped `git_log` walks all of history when nothing matches, and a diff between
+  distant revisions costs the distance. `-git-timeout` bounds every git operation, and the
+  walk checks for cancellation as it goes, so a caller that gives up stops the work.
 
 `git_show` and `git_diff` omit the patch text unless `include_patch` is set: the per-file
 line counts answer most questions and a diff is the largest thing either can return.
@@ -132,6 +151,24 @@ A caller may ask for less than a ceiling but never more.
 There is no response cache. Unlike a remote public API, zoekt is local, fast, and
 continuously re-indexed; a cache would mostly serve stale answers about code that just
 changed.
+
+## Fuzzing
+
+`go test -fuzz` covers the parts where a wrong answer is silent rather than loud:
+
+| Target | Property |
+| --- | --- |
+| `FuzzExactAtomEncodesOneToken` | An encoded value tokenizes as exactly one atom and decodes to the intended regexp. Unquoted whitespace would split it and silently change what the query means. |
+| `FuzzPlainAtomEncodesOneToken` | A plain atom decodes unchanged — escaping `lang:` or `branch:` makes them match nothing at all. |
+| `FuzzSearchDecodesArbitraryResponses` | A wrong or wedged upstream cannot panic this process. |
+| `FuzzOpenStaysInsideTheRoot` | No path input opens a repository whose real path is outside the root. |
+| `FuzzBlameRangesAreBounded` | No line range returns lines outside the file. |
+
+CI runs a short pass on every change. A longer campaign belongs in a scheduled run:
+
+```sh
+go test ./internal/zoekt/ -run=X -fuzz=FuzzExactAtomEncodesOneToken -fuzztime=10m
+```
 
 ## Query syntax
 

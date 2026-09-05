@@ -124,7 +124,9 @@ func addGitTools(server *mcp.Server, store *gitrepo.Store, locator *repoLocator,
 		}
 		limit := clamp(in.Limit, config.MaxCommits)
 		// Ask for one more than the limit so the caller learns there is more.
-		commits, err := store.Log(path, gitrepo.LogOptions{Rev: in.Ref, Path: in.Path, Limit: limit + 1})
+		gitCtx, cancel := withGitDeadline(ctx, config)
+		defer cancel()
+		commits, err := store.Log(gitCtx, path, gitrepo.LogOptions{Rev: in.Ref, Path: in.Path, Limit: limit + 1})
 		if err != nil {
 			return nil, GitLogOutput{}, err
 		}
@@ -149,7 +151,9 @@ func addGitTools(server *mcp.Server, store *gitrepo.Store, locator *repoLocator,
 		if err := require("rev", in.Rev); err != nil {
 			return nil, GitShowOutput{}, err
 		}
-		commit, files, patch, truncated, err := store.Show(path, in.Rev, in.IncludePatch, config.MaxPatchBytes)
+		gitCtx, cancel := withGitDeadline(ctx, config)
+		defer cancel()
+		commit, files, patch, truncated, err := store.Show(gitCtx, path, in.Rev, in.IncludePatch, config.MaxPatchBytes)
 		if err != nil {
 			return nil, GitShowOutput{}, err
 		}
@@ -173,7 +177,9 @@ func addGitTools(server *mcp.Server, store *gitrepo.Store, locator *repoLocator,
 		if err := require("to", in.To); err != nil {
 			return nil, GitDiffOutput{}, err
 		}
-		files, patch, truncated, err := store.Diff(path, in.From, in.To, in.IncludePatch, config.MaxPatchBytes)
+		gitCtx, cancel := withGitDeadline(ctx, config)
+		defer cancel()
+		files, patch, truncated, err := store.Diff(gitCtx, path, in.From, in.To, in.IncludePatch, config.MaxPatchBytes)
 		if err != nil {
 			return nil, GitDiffOutput{}, err
 		}
@@ -204,7 +210,9 @@ func addGitTools(server *mcp.Server, store *gitrepo.Store, locator *repoLocator,
 		if end <= 0 || end-start+1 > config.MaxBlameLines {
 			end = start + config.MaxBlameLines - 1
 		}
-		lines, total, err := store.Blame(path, in.Rev, in.Path, start, end)
+		gitCtx, cancel := withGitDeadline(ctx, config)
+		defer cancel()
+		lines, total, err := store.Blame(gitCtx, path, in.Rev, in.Path, start, end, config.MaxBlameFileLines)
 		if err != nil {
 			return nil, GitBlameOutput{}, err
 		}
@@ -225,7 +233,9 @@ func addGitTools(server *mcp.Server, store *gitrepo.Store, locator *repoLocator,
 		if err := require("path", in.Path); err != nil {
 			return nil, GitFileOutput{}, err
 		}
-		content, truncated, err := store.File(path, in.Rev, in.Path, config.MaxFileBytes)
+		gitCtx, cancel := withGitDeadline(ctx, config)
+		defer cancel()
+		content, truncated, err := store.File(gitCtx, path, in.Rev, in.Path, config.MaxFileBytes)
 		if err != nil {
 			return nil, GitFileOutput{}, err
 		}
@@ -243,12 +253,25 @@ func addGitTools(server *mcp.Server, store *gitrepo.Store, locator *repoLocator,
 		if err != nil {
 			return nil, GitRefsOutput{}, err
 		}
-		refs, err := store.Refs(path)
+		gitCtx, cancel := withGitDeadline(ctx, config)
+		defer cancel()
+		refs, err := store.Refs(gitCtx, path)
 		if err != nil {
 			return nil, GitRefsOutput{}, err
 		}
 		return nil, GitRefsOutput{Repo: in.Repo, Refs: refs, Count: len(refs)}, nil
 	})
+}
+
+// withGitDeadline bounds one git operation. Reading a repository is local but
+// not cheap: a path-scoped log walks all of history when nothing matches, and a
+// diff between distant revisions is proportional to the distance. The response
+// limits bound what comes back, not what is done to produce it.
+func withGitDeadline(ctx context.Context, config Config) (context.Context, context.CancelFunc) {
+	if config.GitTimeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, config.GitTimeout)
 }
 
 func locate(ctx context.Context, locator *repoLocator, repo string) (string, error) {

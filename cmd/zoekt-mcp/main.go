@@ -53,6 +53,8 @@ func main() {
 	maxCommits := flag.Int("max-commits", intFromEnv("ZOEKT_MCP_MAX_COMMITS", defaults.MaxCommits), "maximum commits returned by one history walk")
 	maxPatchBytes := flag.Int("max-patch-bytes", intFromEnv("ZOEKT_MCP_MAX_PATCH_BYTES", defaults.MaxPatchBytes), "maximum bytes of unified diff returned")
 	maxBlameLines := flag.Int("max-blame-lines", intFromEnv("ZOEKT_MCP_MAX_BLAME_LINES", defaults.MaxBlameLines), "maximum lines returned by one blame")
+	maxBlameFileLines := flag.Int("max-blame-file-lines", intFromEnv("ZOEKT_MCP_MAX_BLAME_FILE_LINES", defaults.MaxBlameFileLines), "refuse to blame a file longer than this, since blame costs the whole file regardless of the range requested")
+	gitTimeout := flag.Duration("git-timeout", durationFromEnv("ZOEKT_MCP_GIT_TIMEOUT", defaults.GitTimeout), "deadline for one git operation")
 	repoPathTTL := flag.Duration("repo-path-ttl", durationFromEnv("ZOEKT_MCP_REPO_PATH_TTL", defaults.RepoPathTTL), "how long a repository name to clone-path mapping is reused")
 	showVersion := flag.Bool("version", false, "print the server version and exit")
 	flag.Parse()
@@ -63,15 +65,17 @@ func main() {
 	}
 
 	config := mcpserver.Config{
-		MaxFiles:         *maxFiles,
-		MaxChunksPerFile: *maxChunks,
-		ContextLines:     *contextLines,
-		MaxFileBytes:     *maxFileBytes,
-		SearchTimeout:    *searchTimeout,
-		MaxCommits:       *maxCommits,
-		MaxPatchBytes:    *maxPatchBytes,
-		MaxBlameLines:    *maxBlameLines,
-		RepoPathTTL:      *repoPathTTL,
+		MaxFiles:          *maxFiles,
+		MaxChunksPerFile:  *maxChunks,
+		ContextLines:      *contextLines,
+		MaxFileBytes:      *maxFileBytes,
+		SearchTimeout:     *searchTimeout,
+		MaxCommits:        *maxCommits,
+		MaxPatchBytes:     *maxPatchBytes,
+		MaxBlameLines:     *maxBlameLines,
+		MaxBlameFileLines: *maxBlameFileLines,
+		GitTimeout:        *gitTimeout,
+		RepoPathTTL:       *repoPathTTL,
 	}
 	if err := validate(config); err != nil {
 		log.Fatal(err)
@@ -126,6 +130,12 @@ func validate(config mcpserver.Config) error {
 	}
 	if config.MaxBlameLines <= 0 {
 		return fmt.Errorf("max blame lines must be positive")
+	}
+	if config.MaxBlameFileLines <= 0 {
+		return fmt.Errorf("max blame file lines must be positive")
+	}
+	if config.GitTimeout <= 0 {
+		return fmt.Errorf("git timeout must be positive")
 	}
 	return nil
 }
