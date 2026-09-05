@@ -10,7 +10,7 @@ import (
 )
 
 func TestNewHTTPHandlerRejectsUnusableInput(t *testing.T) {
-	server := New(&fakeSearcher{}, testConfig())
+	server := New(&fakeSearcher{}, nil, testConfig())
 	if _, err := NewHTTPHandler(nil, "/mcp"); err == nil {
 		t.Fatal("nil server accepted; want an error")
 	}
@@ -35,7 +35,7 @@ func TestStreamableHTTPNegotiates20260728AndCallsTool(t *testing.T) {
 		Stats: zoekt.Stats{MatchCount: 1},
 	}}
 
-	handler, err := NewHTTPHandler(New(searcher, testConfig()), "/mcp")
+	handler, err := NewHTTPHandler(New(searcher, nil, testConfig()), "/mcp")
 	if err != nil {
 		t.Fatalf("NewHTTPHandler: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestStreamableHTTPNegotiates20260728AndCallsTool(t *testing.T) {
 }
 
 func TestCallToolReportsAnEmptyQueryAsAToolError(t *testing.T) {
-	handler, err := NewHTTPHandler(New(&fakeSearcher{}, testConfig()), "/mcp")
+	handler, err := NewHTTPHandler(New(&fakeSearcher{}, nil, testConfig()), "/mcp")
 	if err != nil {
 		t.Fatalf("NewHTTPHandler: %v", err)
 	}

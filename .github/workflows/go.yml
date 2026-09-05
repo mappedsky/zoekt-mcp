@@ -42,3 +42,20 @@ jobs:
 
       - name: Test
         run: go test -race ./...
+
+      # A short pass on every change, seeded by the committed corpus. It is a
+      # smoke test for the escaping and path-confinement invariants, not a
+      # campaign; a real campaign belongs in a scheduled run.
+      - name: Fuzz
+        run: |
+          for target in \
+            FuzzExactAtomEncodesOneToken \
+            FuzzPlainAtomEncodesOneToken \
+            FuzzSearchDecodesArbitraryResponses; do
+            go test ./internal/zoekt/ -run=X -fuzz="^$target\$" -fuzztime=20s
+          done
+          for target in \
+            FuzzOpenStaysInsideTheRoot \
+            FuzzBlameRangesAreBounded; do
+            go test ./internal/gitrepo/ -run=X -fuzz="^$target\$" -fuzztime=20s
+          done

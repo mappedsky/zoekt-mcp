@@ -18,8 +18,14 @@ import (
 	"time"
 )
 
-// maxErrorBody bounds how much of a failed response is quoted back in an error.
-const maxErrorBody = 4096
+const (
+	// maxErrorBody bounds how much of a failed response is quoted back in an error.
+	maxErrorBody = 4096
+	// maxResponseBody bounds a successful response. The upstream is trusted and
+	// in-cluster, but a bounded decode is what stops a wrong or wedged one from
+	// becoming this process's memory problem.
+	maxResponseBody = 256 << 20
+)
 
 // SearchOptions is the subset of zoekt.SearchOptions this client sets.
 // Fields are omitted when zero so the server applies its own heuristics.
@@ -120,8 +126,13 @@ type RepositoryBranch struct {
 
 // Repository is the indexed metadata for one repository.
 type Repository struct {
-	Name       string             `json:"Name"`
-	URL        string             `json:"URL"`
+	Name string `json:"Name"`
+	URL  string `json:"URL"`
+	// Source is the directory the shard was built from. Sourcebot indexes bare
+	// clones under its own data directory and names them by an internal id, so
+	// this is the only mapping from the repository name a caller knows to the
+	// clone the git tools have to open.
+	Source     string             `json:"Source"`
 	Branches   []RepositoryBranch `json:"Branches"`
 	HasSymbols bool               `json:"HasSymbols"`
 }
@@ -250,7 +261,7 @@ func (c *Client) post(ctx context.Context, path string, payload, out any) error 
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("zoekt %s: %s", path, describeFailure(response))
 	}
-	if err := json.NewDecoder(response.Body).Decode(out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBody)).Decode(out); err != nil {
 		return fmt.Errorf("decode %s response: %w", path, err)
 	}
 	return nil
